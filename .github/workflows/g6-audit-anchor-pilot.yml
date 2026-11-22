@@ -1,0 +1,77 @@
+name: OmniRoute G6 Sigstore Hash-Only Anchor Pilot
+
+on:
+  workflow_dispatch:
+    inputs:
+      scope_sha256:
+        description: Public V1 scope SHA256, uppercase hex only
+        required: true
+        type: string
+      revision:
+        description: Existing signed event revision (positive integer)
+        required: true
+        type: string
+      event_sha256:
+        description: Public V1 EventSha256, uppercase hex only
+        required: true
+        type: string
+      audit_head_sha256:
+        description: Public V1 AuditHeadSha256, uppercase hex only
+        required: true
+        type: string
+      branch_oid:
+        description: Exact 40-hex commit OID of witness-audit
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  anchor:
+    # This is manual-only, no push / pull_request / repository_dispatch hook.
+    if: github.repository == 'thaobeoo123/omniroute-witness' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Checkout immutable caller workflow commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Verify exact public event and prepare hash-only payload
+        shell: bash
+        env:
+          G6_INPUT_SCOPE_SHA256: ${{ inputs.scope_sha256 }}
+          G6_INPUT_REVISION: ${{ inputs.revision }}
+          G6_INPUT_EVENT_SHA256: ${{ inputs.event_sha256 }}
+          G6_INPUT_AUDIT_HEAD_SHA256: ${{ inputs.audit_head_sha256 }}
+          G6_INPUT_BRANCH_OID: ${{ inputs.branch_oid }}
+        run: |
+          set -euo pipefail
+          node scripts/g6-verify-event-and-prepare.mjs
+      - name: Install pinned Sigstore Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.0.6
+      - name: Issue keyless OIDC signature and verify workflow identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          cosign sign-blob "$RUNNER_TEMP/g6-audit-anchor-pilot.json" \
+            --bundle "$RUNNER_TEMP/g6-audit-anchor-pilot.sigstore.json" --yes
+          cosign verify-blob "$RUNNER_TEMP/g6-audit-anchor-pilot.json" \
+            --bundle "$RUNNER_TEMP/g6-audit-anchor-pilot.sigstore.json" \
+            --certificate-identity \
+              "https://github.com/thaobeoo123/omniroute-witness/.github/workflows/g6-audit-anchor-pilot.yml@refs/heads/main" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+      - name: Archive public hash payload and transparency bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: g6-sigstore-pilot-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/g6-audit-anchor-pilot.json
+            ${{ runner.temp }}/g6-audit-anchor-pilot.sigstore.json
+          if-no-files-found: error
+          retention-days: 7
+
